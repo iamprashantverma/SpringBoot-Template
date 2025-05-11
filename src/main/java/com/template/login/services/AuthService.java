@@ -3,11 +3,13 @@ package com.template.login.services;
 import com.template.login.dto.LoginDTO;
 import com.template.login.dto.LoginResponseDTO;
 import com.template.login.dto.UserDTO;
+import com.template.login.entities.BlacklistedToken;
 import com.template.login.entities.Session;
 import com.template.login.entities.User;
-import com.template.login.exceptions.ResourceAlreadyExists;
-import com.template.login.exceptions.ResourceNotFound;
-import com.template.login.exceptions.UnauthorizedAccess;
+import com.template.login.exceptions.ResourceAlreadyExistsException;
+import com.template.login.exceptions.ResourceNotFoundException;
+import com.template.login.exceptions.UnauthorizedAccessException;
+import com.template.login.repositories.BlackListedTokenRepository;
 import com.template.login.repositories.SessionRepository;
 import com.template.login.repositories.UserRepository;
 import jakarta.servlet.http.Cookie;
@@ -22,6 +24,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -35,9 +39,10 @@ public class AuthService {
     private final ModelMapper modelMapper;
     private final PasswordEncoder passwordEncoder;
     private final JWTService jwtService;
+    private final BlackListedTokenRepository blackListedTokenRepository;
 
     @Value("${SESSION_MAX_SESSIONS_PER_USER}")
-    private final Integer MAX_SESSIONS_PER_USER ;
+    private int MAX_SESSIONS_PER_USER;
 
     private String extractRefreshTokenFromCookies(HttpServletRequest request) {
         Cookie[] cookies = request.getCookies();
@@ -53,56 +58,47 @@ public class AuthService {
 
     @Transactional
     public UserDTO signUp(@Valid UserDTO user) {
-        String email = user.getEmail();
+        Optional<User> optionalUser = userRepository.findByEmail(user.getEmail());
+        if (optionalUser.isPresent()) {
+            throw new ResourceAlreadyExistsException("Email is already registered. Please login.");
+        }
 
-        Optional<User> optionalUser = userRepository.findByEmail(email);
-        if (optionalUser.isPresent())
-                throw  new ResourceAlreadyExists("Email is Already Registered !. Please Login ");
-
-        User toBeCreated =  modelMapper.map(user,User.class);
-
-        String hashPassword = passwordEncoder.encode(user.getPassword());
-        toBeCreated.setPassword(hashPassword);
-
+        User toBeCreated = modelMapper.map(user, User.class);
+        toBeCreated.setPassword(passwordEncoder.encode(user.getPassword()));
         User savedUser = userRepository.save(toBeCreated);
 
-        return modelMapper.map(savedUser,UserDTO.class);
-
+        return modelMapper.map(savedUser, UserDTO.class);
     }
 
     @Transactional
     public LoginResponseDTO logIn(@Valid LoginDTO login, HttpServletResponse servletResponse) {
-        String email = login.getEmail();
-        String password = login.getPassword();
+        User user = userRepository.findByEmail(login.getEmail())
+                .orElseThrow(() -> new ResourceNotFoundException("Email is not registered. Please sign up."));
 
-        Optional<User> optionalUser = userRepository.findByEmail(email);
-        if (optionalUser.isEmpty())
-            throw new ResourceNotFound("Email is not registered !. Sign Up");
-
-        // handling sessions
-        List<Session> userSessions = sessionRepository.findAllByUser_Email(email);
-
-        if (userSessions.size() == MAX_SESSIONS_PER_USER) {
-            userSessions.sort((a, b) -> a.getExpiresAt().compareTo(b.getExpiresAt()));
-            Session oldSession = userSessions.get(0);
-            sessionRepository.delete(oldSession);
+        if (!passwordEncoder.matches(login.getPassword(), user.getPassword())) {
+            throw new UnauthorizedAccessException("Incorrect password");
         }
 
-        // matching the password
-        String hashPassword = optionalUser.get().getPassword();
-
-        if (!passwordEncoder.matches(password,hashPassword)){
-            throw  new UnauthorizedAccess("wrong password");
+        List<Session> userSessions = sessionRepository.findAllByUser_Email(login.getEmail());
+        if (userSessions.size() >= MAX_SESSIONS_PER_USER) {
+            userSessions.sort(Comparator.comparing(Session::getCreatedAt));
+            sessionRepository.delete(userSessions.get(0));
         }
 
-        // generate the tokens
-        String accessToken = jwtService.generateAccessToken(optionalUser.get());
-        String refreshToken = jwtService.generateRefreshToken(optionalUser.get());
+        String accessToken = jwtService.generateAccessToken(user);
+        String refreshToken = jwtService.generateRefreshToken(user);
 
-        Cookie cookie = new Cookie("refresh_token",refreshToken);
+        Session newSession = Session.builder()
+                .createdAt(LocalDateTime.now())
+                .refreshToken(refreshToken)
+                .user(user)
+                .build();
+        sessionRepository.save(newSession);
+
+        Cookie cookie = new Cookie("refresh_token", refreshToken);
         cookie.setHttpOnly(true);
         cookie.setPath("/");
-        cookie.setMaxAge(60 * 60 * 24 * 30);
+        cookie.setMaxAge(60 * 60 * 24 * 30); // 30 days
         servletResponse.addCookie(cookie);
 
         return LoginResponseDTO.builder()
@@ -112,20 +108,61 @@ public class AuthService {
 
     public LoginResponseDTO refreshToken(HttpServletRequest servletRequest) {
         String refreshToken = extractRefreshTokenFromCookies(servletRequest);
+
         if (refreshToken == null) {
-            throw new RuntimeException("Refresh token is missing in cookies");
+            throw new UnauthorizedAccessException("Refresh token is missing");
+        }
+
+        // Check if the refresh token is blacklisted
+        Optional<BlacklistedToken> blacklistedOpt = blackListedTokenRepository.findByRefreshToken(refreshToken);
+        if (blacklistedOpt.isPresent()) {
+            throw new UnauthorizedAccessException("Refresh token has been blacklisted. Please log in again.");
         }
 
         String userId = jwtService.getUserIdFromToken(refreshToken);
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with ID: " + userId));
 
-        User user = userRepository.findById(userId).orElseThrow(()->new ResourceNotFound("user not found with this Id:"+userId));
-        String accessToken = jwtService.generateAccessToken(user);
+        String newAccessToken = jwtService.generateAccessToken(user);
 
-        return  LoginResponseDTO.builder()
-                .accessToken(accessToken)
+        // only do this if Session has an accessToken field
+        Session session = sessionRepository.findByRefreshToken(refreshToken)
+                .orElseThrow(() -> new ResourceNotFoundException("Session not found for refresh token"));
+
+        // session.setAccessToken(newAccessToken);
+        sessionRepository.save(session);
+
+        return LoginResponseDTO.builder()
+                .accessToken(newAccessToken)
                 .build();
     }
 
+    @Transactional
+    public void logOut(HttpServletRequest request, HttpServletResponse response) {
+        String refreshToken = extractRefreshTokenFromCookies(request);
 
+        if (refreshToken == null) {
+            throw new UnauthorizedAccessException("Refresh token is missing in request");
+        }
+
+        Session session = sessionRepository.findByRefreshToken(refreshToken)
+                .orElseThrow(() -> new ResourceNotFoundException("Session not found for the given token"));
+
+        sessionRepository.delete(session);
+
+        // Remove refresh token cookie
+        Cookie cookie = new Cookie("refresh_token", "");
+        cookie.setMaxAge(0);
+        cookie.setPath("/");
+        response.addCookie(cookie);
+
+        BlacklistedToken blacklistedToken = BlacklistedToken.builder()
+                        .accessToken(session.getAccessToken())
+                                .refreshToken(session.getRefreshToken())
+                                        .build();
+
+        blackListedTokenRepository.save(blacklistedToken);
+
+    }
 
 }

@@ -1,7 +1,7 @@
 package com.template.login.exceptions;
 
-public class ResourceAlreadyExists extends RuntimeException {
-    public ResourceAlreadyExists(String message) {
+public class ResourceAlreadyExistsException extends RuntimeException {
+    public ResourceAlreadyExistsException(String message) {
         super(message);
     }
 }

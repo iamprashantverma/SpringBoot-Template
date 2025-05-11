@@ -1,8 +1,7 @@
 package com.template.login.entities;
 
 import jakarta.persistence.*;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
 import java.time.LocalDateTime;
 
@@ -10,7 +9,9 @@ import static com.template.login.util.UserUtil.generateSessionId;
 
 @Entity
 @Data
+@Builder
 @NoArgsConstructor
+@AllArgsConstructor
 public class Session {
 
     @Id
@@ -25,10 +26,9 @@ public class Session {
     private String refreshToken;
 
     @Column(nullable = false)
-    private LocalDateTime createdAt;
+    private String accessToken;
 
     @Column(nullable = false)
-    private LocalDateTime expiresAt;
-
+    private LocalDateTime createdAt;
 
 }

@@ -2,7 +2,7 @@ SESSION_MAX_SESSIONS_PER_USER: 2
 
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/lms?useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://localhost:3306/loginDemo?useSSL=false&allowPublicKeyRetrieval=true
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
   jpa:

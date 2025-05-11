@@ -1,7 +1,7 @@
 package com.template.login.exceptions;
 
-public class ResourceNotFound extends RuntimeException {
-    public ResourceNotFound(String message) {
+public class ResourceNotFoundException extends RuntimeException {
+    public ResourceNotFoundException(String message) {
         super(message);
     }
 }
